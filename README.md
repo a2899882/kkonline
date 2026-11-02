@@ -1,6 +1,6 @@
 # kkonline - 轻量级 Sing-box 一键安装与管理脚本 (KK面板)
 
-基于 233boy 架构深度定制与精简优化的 **Sing-box 轻量一键脚本**，主打**极低内存与硬盘占用、高稳定性、全系统自适应（Debian / Ubuntu / Alpine）**，快捷管理命令为 **`kk`**。
+**Sing-box 轻量一键脚本**，主打**极低内存与硬盘占用、高稳定性、全系统自适应（Debian / Ubuntu / Alpine）**，快捷管理命令为 **`kk`**。
 
 ## 一键安装命令
 
@@ -9,12 +9,14 @@
 ```
 bash <(wget -qO- https://raw.githubusercontent.com/a2899882/kkonline/main/install.sh)
 
+
 ```
 
 **方式二（curl）：**
 
 ```
 bash <(curl -fsSL https://raw.githubusercontent.com/a2899882/kkonline/main/install.sh)
+
 
 ```
 
@@ -56,7 +58,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/a2899882/kkonline/main/insta
 
    * **Hysteria2 (Hy2)**：默认采用 `www.bing.com` 作为伪装 SNI 并自动生成匹配证书与 `pinSHA256` 指纹，支持随时通过 `kk` 更改 SNI、端口、密码。
 
-   * **AnyTLS / TUIC / Trojan / VMess / VLESS-WS-TLS**：全协议支持，支持多节点同时运行。
+   * **AnyTLS / TUIC / Trojan / VLESS-WS-TLS / Socks5**：全主流协议支持，支持多节点同时运行。
 
 ## 快捷命令 (`kk`) 使用指南
 
@@ -82,6 +84,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/a2899882/kkonline/main/insta
 10) 其他工具 (Log/DNS/Reinstall)
 11) 关于脚本 (About)
 
+
 ```
 
 ### 常用命令行快捷操作
@@ -99,9 +102,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/a2899882/kkonline/main/insta
 | 一键添加 AnyTLS | `kk add anytls` | 
 | 一键添加 TUIC | `kk add tuic` | 
 | 交互式更改配置 (端口/密码/SNI/加密方式等) | `kk c` | 
-| 快速更改节点端口 (支持 `auto` 随机端口) | `kk port [节点名] [新端口 | auto]` | 
-| 快速更改节点密码 (支持 `auto` 随机高强度密码) | `kk passwd [节点名] [新密码 | auto]` | 
-| 快速更改节点 SNI 伪装域名 | `kk sni [节点名] [域名 | auto]` | 
+| 快速更改节点端口 (支持 `auto` 随机端口) | \`kk port \[节点名\] \[新端口 | 
+| 快速更改节点密码 (支持 `auto` 随机高强度密码) | \`kk passwd \[节点名\] \[新密码 | 
+| 快速更改节点 SNI 伪装域名 | \`kk sni \[节点名\] \[域名 | 
 | 快速更改 SS 加密方式 | `kk method [节点名] [加密方式]` | 
 | 查看节点信息与连接 URL | `kk i` 或 `kk url` | 
 | 查看节点二维码 | `kk qr` | 

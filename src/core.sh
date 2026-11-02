@@ -11,17 +11,6 @@ protocol_list=(
     VLESS-WS-TLS
     VLESS-H2-TLS
     VLESS-HTTPUpgrade-TLS
-    Trojan-WS-TLS
-    Trojan-H2-TLS
-    Trojan-HTTPUpgrade-TLS
-    VMess-WS
-    VMess-TCP
-    VMess-HTTP
-    VMess-QUIC
-    VMess-WS-TLS
-    VMess-H2-TLS
-    VMess-HTTPUpgrade-TLS
-    # Direct
     Socks
 )
 ss_method_list=(
@@ -910,11 +899,8 @@ add() {
     is_lower=${1,,}
     if [[ $is_lower ]]; then
         case $is_lower in
-        ws | tcp | quic | http)
-            is_new_protocol=VMess-${is_lower^^}
-            ;;
-        wss | h2 | hu | vws | vh2 | vhu | tws | th2 | thu)
-            is_new_protocol=$(sed -E "s/^V/VLESS-/;s/^T/Trojan-/;/^(W|H)/{s/^/VMess-/};s/WSS/WS/;s/HU/HTTPUpgrade/" <<<${is_lower^^})-TLS
+        vws | vh2 | vhu)
+            is_new_protocol=$(sed -E "s/^V/VLESS-/;s/HU/HTTPUpgrade/" <<<${is_lower^^})-TLS
             ;;
         r | reality | vless-reality | vision)
             is_new_protocol=VLESS-REALITY
@@ -964,7 +950,7 @@ add() {
         anytls)
             is_new_protocol=AnyTLS
             ;;
-        socks)
+        socks | socks5)
             is_new_protocol=Socks
             ;;
         *)
