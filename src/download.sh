@@ -1,24 +1,69 @@
+fetch_url_to_file() {
+    local url="$1"
+    local out="$2"
+    local expect_tar="$3"
+    local mirrors=(
+        ""
+        "https://gh-proxy.com/"
+        "https://ghfast.top/"
+        "https://ghproxy.net/"
+        "https://mirror.ghproxy.com/"
+    )
+    for prefix in "${mirrors[@]}"; do
+        local try_url="${prefix}${url}"
+        rm -f "$out"
+        if _wget -t 2 -T 15 -q "$try_url" -O "$out" && [[ -s "$out" ]]; then
+            if [[ $expect_tar ]]; then
+                tar tzf "$out" &>/dev/null && return 0
+            else
+                return 0
+            fi
+        fi
+        rm -f "$out"
+        if [[ $(type -P curl) ]]; then
+            if curl -fsSLk --connect-timeout 10 --max-time 60 "$try_url" -o "$out" 2>/dev/null && [[ -s "$out" ]]; then
+                if [[ $expect_tar ]]; then
+                    tar tzf "$out" &>/dev/null && return 0
+                else
+                    return 0
+                fi
+            fi
+        fi
+    done
+    rm -f "$out"
+    return 1
+}
+
 get_latest_version() {
     case $1 in
     core)
         name=$is_core_name
         url="https://api.github.com/repos/${is_core_repo}/releases/latest?v=$RANDOM"
-        latest_ver=$(_wget -qO- $url | grep tag_name | grep -E -o 'v([0-9.]+)')
+        latest_ver=$(_wget -qO- -T 8 $url 2>/dev/null | grep tag_name | grep -E -o 'v([0-9.]+)' | head -n1)
+        if [[ ! $latest_ver && $(type -P curl) ]]; then
+            latest_ver=$(curl -fsSLk --connect-timeout 5 --max-time 10 -o /dev/null -w '%{url_effective}' "https://github.com/${is_core_repo}/releases/latest" 2>/dev/null | grep -E -o 'v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+        fi
+        if [[ ! $latest_ver ]]; then
+            latest_ver=$(_wget -qO- -T 8 "https://gh-proxy.com/${url}" 2>/dev/null | grep tag_name | grep -E -o 'v([0-9.]+)' | head -n1)
+        fi
         ;;
     sh)
         name="$is_core_name 脚本 (kkonline)"
         url="https://api.github.com/repos/$is_sh_repo/releases/latest?v=$RANDOM"
-        latest_ver=$(_wget -qO- $url | grep tag_name | grep -E -o 'v([0-9.]+)')
+        latest_ver=$(_wget -qO- -T 8 $url 2>/dev/null | grep tag_name | grep -E -o 'v([0-9.]+)' | head -n1)
         # Fallback to main branch latest version if no release tag published yet
         if [[ ! $latest_ver ]]; then
-            latest_ver=$(_wget -qO- "https://raw.githubusercontent.com/${is_sh_repo}/main/kk.sh?v=$RANDOM" | grep '^is_sh_ver=' | head -n1 | cut -d= -f2)
+            latest_ver=$(_wget -qO- -T 8 "https://raw.githubusercontent.com/${is_sh_repo}/main/kk.sh?v=$RANDOM" 2>/dev/null | grep '^is_sh_ver=' | head -n1 | cut -d= -f2)
             [[ ! $latest_ver ]] && latest_ver="main"
         fi
         ;;
     caddy)
         name="Caddy"
         url="https://api.github.com/repos/$is_caddy_repo/releases/latest?v=$RANDOM"
-        latest_ver=$(_wget -qO- $url | grep tag_name | grep -E -o 'v([0-9.]+)')
+        latest_ver=$(_wget -qO- -T 8 $url 2>/dev/null | grep tag_name | grep -E -o 'v([0-9.]+)' | head -n1)
+        if [[ ! $latest_ver && $(type -P curl) ]]; then
+            latest_ver=$(curl -fsSLk --connect-timeout 5 --max-time 10 -o /dev/null -w '%{url_effective}' "https://github.com/${is_caddy_repo}/releases/latest" 2>/dev/null | grep -E -o 'v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+        fi
         ;;
     esac
     [[ ! $latest_ver ]] && {
@@ -54,7 +99,7 @@ download() {
         else
             link="https://github.com/${is_sh_repo}/releases/download/${latest_ver}/code.tar.gz"
         fi
-        if ! _wget -t 3 -c $link -O $tmpfile &>/dev/null; then
+        if ! fetch_url_to_file "$link" "$tmpfile" 1; then
             link="https://github.com/${is_sh_repo}/archive/refs/heads/main.tar.gz"
             download_file
         fi
@@ -87,7 +132,7 @@ download() {
 }
 
 download_file() {
-    if ! _wget -t 5 -c $link -O $tmpfile; then
+    if ! fetch_url_to_file "$link" "$tmpfile" 1; then
         rm -rf $tmpdir
         err "\n下载 ${name} 失败.\n"
     fi

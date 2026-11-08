@@ -45,9 +45,6 @@ is_openrc=$(type -P rc-service)
     err "此系统缺少 ${yellow}(systemctl 或 rc-service)${none}, 请安装 systemd 或确认 Alpine OpenRC 已启用."
 }
 
-# wget installed or none
-is_wget=$(type -P wget)
-
 # x64 / arm64
 case $(uname -m) in
 amd64 | x86_64)
@@ -72,13 +69,6 @@ is_sh_bin=/usr/local/bin/kk
 is_sb_bin=/usr/local/bin/$is_core
 is_sh_dir=$is_core_dir/sh
 is_sh_repo=$author/kkonline
-is_pkg="wget tar bash openssl ca-certificates"
-# Alpine: gcompat provides glibc compatibility for prebuilt binaries; iproute2 provides ss for port checking
-if [[ $cmd =~ apk ]]; then
-    is_pkg="$is_pkg gcompat jq iproute2 coreutils procps"
-elif [[ $cmd =~ apt-get ]]; then
-    is_pkg="$is_pkg iproute2 procps"
-fi
 is_config_json=$is_core_dir/config.json
 tmp_var_lists=(
     tmpcore
@@ -109,7 +99,7 @@ load() {
 # wget add --no-check-certificate
 _wget() {
     [[ $proxy ]] && export https_proxy=$proxy
-    wget --no-check-certificate $*
+    wget --no-check-certificate "$@"
 }
 
 # print a message
@@ -141,15 +131,29 @@ show_help() {
     exit 0
 }
 
-# install dependent pkg (lightweight, cleans package cache to save disk space)
+# install dependent pkg synchronously (maps command names to OS package names accurately)
 install_pkg() {
-    cmd_not_found=
-    for i in $*; do
-        [[ ! $(type -P $i) ]] && cmd_not_found="$cmd_not_found,$i"
-    done
-    if [[ $cmd_not_found ]]; then
-        pkg=$(echo $cmd_not_found | sed 's/,/ /g')
-        msg warn "安装系统依赖包 >${pkg}"
+    local missing_pkgs=()
+    [[ ! $(type -P wget) ]] && missing_pkgs+=("wget")
+    [[ ! $(type -P curl) ]] && missing_pkgs+=("curl")
+    [[ ! $(type -P tar) ]] && missing_pkgs+=("tar")
+    [[ ! $(type -P bash) ]] && missing_pkgs+=("bash")
+    [[ ! $(type -P openssl) ]] && missing_pkgs+=("openssl")
+    [[ ! $(type -P jq) ]] && missing_pkgs+=("jq")
+    [[ ! -d /etc/ssl/certs ]] && missing_pkgs+=("ca-certificates")
+    if [[ $cmd =~ apk ]]; then
+        [[ ! -f /lib/ld-linux-x86-64.so.2 && ! -f /lib/ld-linux-aarch64.so.1 ]] && missing_pkgs+=("gcompat")
+        [[ ! $(type -P ss) ]] && missing_pkgs+=("iproute2")
+        [[ ! $(type -P pgrep) ]] && missing_pkgs+=("procps")
+        [[ ! $(type -P shuf) || ! $(type -P base64) ]] && missing_pkgs+=("coreutils")
+    elif [[ $cmd =~ apt-get ]]; then
+        [[ ! $(type -P ss) && ! $(type -P netstat) ]] && missing_pkgs+=("iproute2")
+        [[ ! $(type -P pgrep) ]] && missing_pkgs+=("procps")
+    fi
+
+    if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
+        local pkg="${missing_pkgs[*]}"
+        msg warn "安装系统依赖包 > ${pkg}"
         if [[ $cmd =~ apk ]]; then
             apk add --no-cache $pkg &>/dev/null || {
                 apk update &>/dev/null
@@ -157,14 +161,12 @@ install_pkg() {
             }
         elif [[ $cmd =~ apt-get ]]; then
             export DEBIAN_FRONTEND=noninteractive
-            $cmd install -y --no-install-recommends $pkg &>/dev/null
-            if [[ $? != 0 ]]; then
+            $cmd install -y --no-install-recommends $pkg &>/dev/null || {
                 $cmd update -y &>/dev/null
                 $cmd install -y --no-install-recommends $pkg &>/dev/null
-            fi
+            }
         else
-            $cmd install -y $pkg &>/dev/null
-            if [[ $? != 0 ]]; then
+            $cmd install -y $pkg &>/dev/null || {
                 [[ $cmd =~ yum ]] && yum install epel-release -y &>/dev/null
                 if [[ $cmd =~ zypper ]]; then
                     $cmd --non-interactive refresh &>/dev/null
@@ -172,42 +174,98 @@ install_pkg() {
                     $cmd update -y &>/dev/null
                 fi
                 $cmd install -y $pkg &>/dev/null
+            }
+        fi
+    fi
+    >$is_pkg_ok
+}
+
+# Resilient file downloader with IPv4/IPv6 + curl + multi-mirror fallback
+fetch_url_to_file() {
+    local url="$1"
+    local out="$2"
+    local expect_tar="$3"
+    local mirrors=(
+        ""
+        "https://gh-proxy.com/"
+        "https://ghfast.top/"
+        "https://ghproxy.net/"
+        "https://mirror.ghproxy.com/"
+    )
+    for prefix in "${mirrors[@]}"; do
+        # Skip mirrors if custom proxy is already set
+        [[ $proxy && -n $prefix ]] && continue
+        local try_url="${prefix}${url}"
+        rm -f "$out"
+        if _wget -t 2 -T 15 -q "$try_url" -O "$out" && [[ -s "$out" ]]; then
+            if [[ $expect_tar ]]; then
+                tar tzf "$out" &>/dev/null && return 0
+            else
+                return 0
             fi
         fi
-        [[ $? == 0 ]] && >$is_pkg_ok
-    else
-        >$is_pkg_ok
+        rm -f "$out"
+        if [[ $(type -P curl) ]]; then
+            local curl_proxy=()
+            [[ $proxy ]] && curl_proxy=(-x "$proxy")
+            if curl "${curl_proxy[@]}" -fsSLk --connect-timeout 10 --max-time 60 "$try_url" -o "$out" 2>/dev/null && [[ -s "$out" ]]; then
+                if [[ $expect_tar ]]; then
+                    tar tzf "$out" &>/dev/null && return 0
+                else
+                    return 0
+                fi
+            fi
+        fi
+    done
+    rm -f "$out"
+    return 1
+}
+
+# Resolve latest sing-box release tag reliably (handles GitHub API rate-limit & IPv6)
+get_latest_core_ver() {
+    local ver=""
+    ver=$(_wget -qO- -T 8 "https://api.github.com/repos/${is_core_repo}/releases/latest?v=$RANDOM" 2>/dev/null | grep tag_name | grep -E -o 'v([0-9.]+)' | head -n1)
+    if [[ ! $ver && $(type -P curl) ]]; then
+        ver=$(curl -fsSLk --connect-timeout 5 --max-time 10 -o /dev/null -w '%{url_effective}' "https://github.com/${is_core_repo}/releases/latest" 2>/dev/null | grep -E -o 'v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
     fi
+    if [[ ! $ver ]]; then
+        ver=$(_wget -qO- -T 8 "https://gh-proxy.com/https://api.github.com/repos/${is_core_repo}/releases/latest?v=$RANDOM" 2>/dev/null | grep tag_name | grep -E -o 'v([0-9.]+)' | head -n1)
+    fi
+    [[ ! $ver ]] && ver="v1.14.4"
+    echo "$ver"
 }
 
 # download file
 download() {
     case $1 in
     core)
-        [[ ! $is_core_ver ]] && is_core_ver=$(_wget -qO- "https://api.github.com/repos/${is_core_repo}/releases/latest?v=$RANDOM" | grep tag_name | grep -E -o 'v([0-9.]+)')
-        [[ $is_core_ver ]] && link="https://github.com/${is_core_repo}/releases/download/${is_core_ver}/${is_core}-${is_core_ver:1}-linux-${is_arch}.tar.gz"
+        [[ ! $is_core_ver ]] && is_core_ver=$(get_latest_core_ver)
+        link="https://github.com/${is_core_repo}/releases/download/${is_core_ver}/${is_core}-${is_core_ver:1}-linux-${is_arch}.tar.gz"
         name=$is_core_name
         tmpfile=$tmpcore
         is_ok=$is_core_ok
-        [[ $link ]] && {
-            msg warn "下载 ${name} > ${link}"
-            if _wget -t 3 -q -c $link -O $tmpfile; then
-                mv -f $tmpfile $is_ok
+        msg warn "下载 ${name} (${is_core_ver}) > ${link}"
+        if fetch_url_to_file "$link" "$tmpfile" 1; then
+            mv -f "$tmpfile" "$is_ok"
+        else
+            # Fallback to SourceForge official sing-box mirror if all GitHub routes fail
+            sf_link="https://sourceforge.net/projects/sing-box.mirror/files/${is_core_ver}/${is_core}-${is_core_ver:1}-linux-${is_arch}.tar.gz/download"
+            if fetch_url_to_file "$sf_link" "$tmpfile" 1; then
+                mv -f "$tmpfile" "$is_ok"
             fi
-        }
+        fi
         ;;
     sh)
-        # Support both GitHub main branch archive directly (no Release needed) and Releases code.tar.gz
         link_main="https://github.com/${is_sh_repo}/archive/refs/heads/main.tar.gz"
         link_rel="https://github.com/${is_sh_repo}/releases/latest/download/code.tar.gz"
         name="$is_core_name 脚本 (kkonline)"
         tmpfile=$tmpsh
         is_ok=$is_sh_ok
         msg warn "下载 ${name} > ${link_main}"
-        if _wget -t 3 -q -c $link_main -O $tmpfile; then
-            mv -f $tmpfile $is_ok
-        elif _wget -t 3 -q -c $link_rel -O $tmpfile; then
-            mv -f $tmpfile $is_ok
+        if fetch_url_to_file "$link_main" "$tmpfile" 1; then
+            mv -f "$tmpfile" "$is_ok"
+        elif fetch_url_to_file "$link_rel" "$tmpfile" 1; then
+            mv -f "$tmpfile" "$is_ok"
         fi
         ;;
     jq)
@@ -215,22 +273,20 @@ download() {
         name="jq"
         tmpfile=$tmpjq
         is_ok=$is_jq_ok
-        [[ $link ]] && {
-            msg warn "下载 ${name} > ${link}"
-            if _wget -t 3 -q -c $link -O $tmpfile; then
-                mv -f $tmpfile $is_ok
-            fi
-        }
+        msg warn "下载 ${name} > ${link}"
+        if fetch_url_to_file "$link" "$tmpfile" ""; then
+            mv -f "$tmpfile" "$is_ok"
+        fi
         ;;
     esac
 }
 
 # get server ip
 get_ip() {
-    export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ -z $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ -z $ip ]] && ip=$(_wget -4 -qO- https://api.ipify.org 2>/dev/null)
-    [[ -z $ip ]] && ip=$(_wget -6 -qO- https://api64.ipify.org 2>/dev/null)
+    export "$(_wget -4 -qO- -T 5 https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
+    [[ -z $ip ]] && export "$(_wget -6 -qO- -T 5 https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
+    [[ -z $ip ]] && ip=$(_wget -4 -qO- -T 5 https://api.ipify.org 2>/dev/null)
+    [[ -z $ip ]] && ip=$(_wget -6 -qO- -T 5 https://api64.ipify.org 2>/dev/null)
 }
 
 # check background tasks status
@@ -238,39 +294,22 @@ check_status() {
     # dependent pkg install fail
     [[ ! -f $is_pkg_ok ]] && {
         msg err "安装依赖包失败"
-        if [[ $cmd =~ apk ]]; then
-            msg err "请尝试手动安装依赖包: apk update; apk add $is_pkg"
-        else
-            msg err "请尝试手动安装依赖包: $cmd update -y; $cmd install -y $is_pkg"
-        fi
         is_fail=1
     }
 
     # download file status
-    if [[ $is_wget ]]; then
-        [[ ! -f $is_core_ok ]] && {
-            msg err "下载 ${is_core_name} 失败"
-            is_fail=1
-        }
-        [[ ! -f $is_sh_ok ]] && {
-            msg err "下载 ${is_core_name} 脚本失败"
-            is_fail=1
-        }
-        [[ ! -f $is_jq_ok ]] && {
-            msg err "下载 jq 失败"
-            is_fail=1
-        }
-    else
-        [[ ! $is_fail ]] && {
-            is_wget=1
-            [[ ! $is_core_file ]] && download core &
-            [[ ! $local_install ]] && download sh &
-            [[ $jq_not_found ]] && download jq &
-            get_ip
-            wait
-            check_status
-        }
-    fi
+    [[ ! -f $is_core_ok ]] && {
+        msg err "下载 ${is_core_name} 失败"
+        is_fail=1
+    }
+    [[ ! -f $is_sh_ok ]] && {
+        msg err "下载 ${is_core_name} 脚本失败"
+        is_fail=1
+    }
+    [[ ! -f $is_jq_ok ]] && {
+        msg err "下载 jq 失败"
+        is_fail=1
+    }
 
     # found fail status, remove tmp dir and exit.
     [[ $is_fail ]] && {
@@ -382,31 +421,21 @@ main() {
         }
     fi
 
-    # install dependent pkg
-    if [[ $cmd =~ apk ]]; then
-        # Alpine: install full utilities with --no-cache to save disk space
-        apk add --no-cache $is_pkg &>/dev/null || {
-            apk update &>/dev/null
-            apk add --no-cache $is_pkg &>/dev/null
-        }
-        [[ $? == 0 ]] && >$is_pkg_ok
-    else
-        install_pkg $is_pkg &
-    fi
+    # 1. Install dependent packages first (so ca-certificates / wget / curl / jq are ready before downloading)
+    install_pkg
 
-    # jq
+    # 2. Check if jq is installed via package manager; if not, download prebuilt jq binary
     if [[ $(type -P jq) ]]; then
         >$is_jq_ok
     else
         jq_not_found=1
     fi
-    # if wget installed. download core, sh, jq, get ip
-    [[ $is_wget ]] && {
-        [[ ! $is_core_file ]] && download core &
-        [[ ! $local_install ]] && download sh &
-        [[ $jq_not_found ]] && download jq &
-        get_ip
-    }
+
+    # 3. Download core, sh, jq (if needed), and resolve public IP
+    [[ ! $is_core_file ]] && download core &
+    [[ ! $local_install ]] && download sh &
+    [[ $jq_not_found ]] && download jq &
+    get_ip
 
     # waiting for background tasks is done
     wait
@@ -476,7 +505,7 @@ main() {
     ln -sf $is_sh_dir/kk.sh /usr/local/bin/sb
 
     # jq
-    [[ $jq_not_found ]] && mv -f $is_jq_ok /usr/bin/jq
+    [[ $jq_not_found && -f $is_jq_ok ]] && mv -f $is_jq_ok /usr/bin/jq
 
     # chmod
     chmod +x $is_core_bin $is_sh_bin $is_sb_bin /usr/local/bin/sb $is_sh_dir/kk.sh $is_sh_dir/$is_core.sh /usr/bin/jq 2>/dev/null
